@@ -101,6 +101,11 @@ struct channel {
 	unsigned int id;
 };
 
+struct attr_read_data {
+	btd_attr_read_result_t func;
+	void* user_data;
+};
+
 static GList *local_attribute_db = NULL;
 static unsigned int next_nofifier_id = 1;
 static uint16_t next_handle = 1;
@@ -409,6 +414,51 @@ void btd_gatt_read_attribute(struct btd_device *device,
 		result(0, attr->value, attr->value_len, user_data);
 	else
 		result(ATT_ECODE_READ_NOT_PERM, NULL, 0, user_data);
+}
+
+static void client_read_attribute_response(guint8 status, const guint8 *rpdu,
+					guint16 rlen, gpointer user_data)
+{
+	struct attr_read_data *data = user_data;
+	btd_attr_read_result_t func = data->func;
+
+	if (status)
+		goto error;
+
+	if (dec_read_resp(rpdu, rlen, NULL, 0) < 0) {
+		status = ATT_ECODE_INVALID_PDU;
+		goto error;
+	}
+
+	func(status, (uint8_t *) rpdu + 1, rlen - 1, data->user_data);
+	return;
+
+error:
+	func(status, NULL, 0, data->user_data);
+}
+
+static void client_read_attribute_cb(struct btd_device *device,
+						struct btd_attribute *attr,
+						btd_attr_read_result_t result,
+						void *user_data)
+{
+	uint8_t *buf;
+	size_t buflen;
+	guint16 plen;
+	GAttrib *attrib;
+	struct attr_read_data *data;
+
+	attrib = device_get_attrib(device);
+	buf = g_attrib_get_buffer(attrib, &buflen);
+	plen = enc_read_req(attr->handle, buf, buflen);
+
+	data = g_new0(struct attr_read_data, 1);
+	data->func = result;
+	data->user_data = user_data;
+
+	/* FIXME: Add support for Read Long */
+	g_attrib_send(attrib, 0, buf, plen, client_read_attribute_response,
+							data, g_free);
 }
 
 void btd_gatt_write_attribute(struct btd_device *device,
@@ -974,8 +1024,8 @@ static void insert_char_declaration(uint8_t status, uint16_t handle,
 	else if (vlen == 16)
 		value_uuid = att_get_uuid128(&value[3]);
 
-	/* FIXME: missing callbacks */
-	attr = new_attribute(&value_uuid, NULL, NULL);
+	/* FIXME: missing write callback */
+	attr = new_attribute(&value_uuid, client_read_attribute_cb, NULL);
 	attr->handle = value_handle;
 
 	root->database = insert_attribute(root->database, attr);
